@@ -29,31 +29,56 @@ from .nn import (
 
 
 class AttentionPool2d(nn.Module):
+    # 从CLIP模型改编而来的2D空间注意力池化层，用于从2D特征图中提取全局特征
+    # 将2D特征图[B, C, H, W]通过注意力机制池化为一个全局特征向量[B, C_out]。
     """
     Adapted from CLIP: https://github.com/openai/CLIP/blob/main/clip/model.py
     """
 
     def __init__(
         self,
-        spacial_dim: int,
-        embed_dim: int,
-        num_heads_channels: int,
-        output_dim: int = None,
+        spacial_dim: int,           # 空间维度（假设H=W，所以是H或W的值）
+        embed_dim: int,             # 嵌入维度（输入特征通道数）
+        num_heads_channels: int,    # 每个注意力头的通道数
+        output_dim: int = None,     # 输出维度（默认与输入相同）
     ):
         super().__init__()
+
+        # 位置嵌入
+        # 形状：[embed_dim, spacial_dim² + 1]
+        # 为什么 +1：为全局平均池化特征添加一个位置
+        # 初始化：使用标准差为 1/√embed_dim 的正态分布
         self.positional_embedding = nn.Parameter(
             th.randn(embed_dim, spacial_dim ** 2 + 1) / embed_dim ** 0.5
         )
+
+        # qkv投影
         self.qkv_proj = conv_nd(1, embed_dim, 3 * embed_dim, 1)
+
+        # 输出投影
         self.c_proj = conv_nd(1, embed_dim, output_dim or embed_dim, 1)
+
+        # 注意力头数
         self.num_heads = embed_dim // num_heads_channels
+
+        # 注意力机制
         self.attention = QKVAttention(self.num_heads)
 
     def forward(self, x):
+        # 展开空间维度
         b, c, *_spatial = x.shape
         x = x.reshape(b, c, -1)  # NC(HW)
-        x = th.cat([x.mean(dim=-1, keepdim=True), x], dim=-1)  # NC(HW+1)
-        x = x + self.positional_embedding[None, :, :].to(x.dtype)  # NC(HW+1)
+
+        # 添加全局平均池化位置
+        # 计算全局平均：[B, C, H * W] → [B, C, 1]
+        # 拼接：[B, C, 1 + H * W]
+        # 作用：提供一个"全局上下文"token
+        x = th.cat([x.mean(dim = -1, keepdim = True), x], dim=-1)  # NC(HW + 1)
+
+        # 添加位置嵌入
+        x = x + self.positional_embedding[None, :, :].to(x.dtype)  # NC(HW + 1)
+
+        # qkv投影 + 注意力 + 输出投影
         x = self.qkv_proj(x)
         x = self.attention(x)
         x = self.c_proj(x)
@@ -70,6 +95,7 @@ class TimestepBlock(nn.Module):
         """
         Apply the module to `x` given `emb` timestep embeddings.
         """
+        # 抽象方法，子类必须实现，用于处理时间步嵌入
 
 
 class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
@@ -77,6 +103,9 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     A sequential module that passes timestep embeddings to the children that
     support it as an extra input.
     """
+    # 时间步嵌入的顺序容器，将时间步嵌入传递给支持它的子模块
+    # 如果子模块是TimestepBlock类型，则传递时间步嵌入
+    # 否则只传递输入张量
 
     def forward(self, x, emb):
         for layer in self:
@@ -96,24 +125,36 @@ class Upsample(nn.Module):
     :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
                  upsampling occurs in the inner-two dimensions.
     """
-
-    def __init__(self, channels, use_conv, dims=2, out_channels=None):
+    # 通用的上采样层，支持不同维度的数据，并可选是否进行卷积平滑
+    def __init__(self, channels, use_conv, dims = 2, out_channels=None):
         super().__init__()
+
+        # 输入输出通道数
         self.channels = channels
-        self.out_channels = out_channels or channels
+
+        # 输出通道数，默认为输入通道数
+        self.out_channels = out_channels or channels             
+
+        # 是否使用卷积       
         self.use_conv = use_conv
         self.dims = dims
         if use_conv:
-            self.conv = conv_nd(dims, self.channels, self.out_channels, 3, padding=1)
+
+            # 卷积核大小为3，padding为1，保持尺寸不变
+            self.conv = conv_nd(dims, self.channels, self.out_channels, 3, padding = 1)
 
     def forward(self, x):
         assert x.shape[1] == self.channels
         if self.dims == 3:
+
+            # 3D数据：只放大最后两个空间维度
             x = F.interpolate(
-                x, (x.shape[2], x.shape[3] * 2, x.shape[4] * 2), mode="nearest"
+                x, (x.shape[2], x.shape[3] * 2, x.shape[4] * 2), mode = "nearest"
             )
         else:
-            x = F.interpolate(x, scale_factor=2, mode="nearest")
+
+            # 1D或2D数据：放大所有空间维度
+            x = F.interpolate(x, scale_factor = 2, mode = "nearest")
         if self.use_conv:
             x = self.conv(x)
         return x
@@ -128,8 +169,9 @@ class Downsample(nn.Module):
     :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
                  downsampling occurs in the inner-two dimensions.
     """
+    # 通用的下采样层，支持不同维度的数据，并可选是否进行卷积平滑
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None):
+    def __init__(self, channels, use_conv, dims = 2, out_channels = None):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
@@ -149,19 +191,23 @@ class Downsample(nn.Module):
         return self.op(x)
 
 def conv_bn(inp, oup, stride):
+    # 普通卷积，batch norm，relu
     return nn.Sequential(
         nn.Conv2d(inp, oup, 3, stride, 1, bias=False),
-        nn.BatchNorm2d(oup),
+        nn.BatchNorm2d(oup),    # 不同样本的同一个通道数，来做归一化
         nn.ReLU(inplace=True)
         )
 
 def conv_dw(inp, oup, stride):
+    # 深度可分离卷积，dw + pw + bn + relu
     return nn.Sequential(
+        # 步骤1：深度卷积（每种食材单独处理）
         # dw
         nn.Conv2d(inp, inp, 3, stride, 1, groups=inp, bias=False),
-        nn.BatchNorm2d(inp),
+        nn.BatchNorm2d(inp),     # 不同样本的同一个通道数，来做归一化
         nn.ReLU(inplace=True),
 
+        # 步骤2：逐点卷积（混合调味）
         # pw
         nn.Conv2d(inp, oup, 1, 1, 0, bias=False),
         nn.BatchNorm2d(oup),
@@ -169,26 +215,25 @@ def conv_dw(inp, oup, stride):
     )
 
 class MobBlock(nn.Module):
-    def __init__(self,ind):
+    # 叠加
+    def __init__(self, ind):
         super().__init__()
-
-
         if ind == 0:
             self.stage = nn.Sequential(
-            conv_bn(3, 32, 2),
-            conv_dw(32, 64, 1),
-            conv_dw(64, 128, 1),
-            conv_dw(128, 128, 1)
-        )
+                conv_bn(3, 32, 2),
+                conv_dw(32, 64, 1),
+                conv_dw(64, 128, 1),
+                conv_dw(128, 128, 1)
+            )
         elif ind == 1:
-            self.stage  = nn.Sequential(
-            conv_dw(128, 256, 2),
-            conv_dw(256, 256, 1)
-        )
+            self.stage = nn.Sequential(
+                conv_dw(128, 256, 2),
+                conv_dw(256, 256, 1)
+            )
         elif ind == 2:
             self.stage = nn.Sequential(
-            conv_dw(256, 256, 2),
-            conv_dw(256, 256, 1)
+                conv_dw(256, 256, 2),
+                conv_dw(256, 256, 1)
             )
         else:
             self.stage = nn.Sequential(
@@ -199,7 +244,6 @@ class MobBlock(nn.Module):
                 conv_dw(512, 512, 1),
                 conv_dw(512, 512, 1)
             )
-
     def forward(self,x):
         return self.stage(x)
 
@@ -221,6 +265,7 @@ class ResBlock(TimestepBlock):
     :param up: if True, use this block for upsampling.
     :param down: if True, use this block for downsampling.
     """
+    # 带时间嵌入的res block，forward过程中使用了checkpoint技术节省内存
 
     def __init__(
         self,
@@ -229,11 +274,11 @@ class ResBlock(TimestepBlock):
         dropout,
         out_channels=None,
         use_conv=False,
-        use_scale_shift_norm=False,
-        dims=2,
-        use_checkpoint=False,
-        up=False,
-        down=False,
+        use_scale_shift_norm = False,
+        dims = 2,
+        use_checkpoint = False,
+        up = False,
+        down = False,
     ):
         super().__init__()
         self.channels = channels
@@ -268,6 +313,7 @@ class ResBlock(TimestepBlock):
                 2 * self.out_channels if use_scale_shift_norm else self.out_channels,
             ),
         )
+
         self.out_layers = nn.Sequential(
             normalization(self.out_channels),
             nn.SiLU(),
@@ -276,7 +322,6 @@ class ResBlock(TimestepBlock):
                 conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1)
             ),
         )
-
         if self.out_channels == channels:
             self.skip_connection = nn.Identity()
         elif use_conv:
@@ -328,6 +373,7 @@ class AttentionBlock(nn.Module):
     Originally ported from here, but adapted to the N-d case.
     https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0706c543/diffusion_tf/models/unet.py#L66.
     """
+    # 注意力模块，使用了QKVAttention和checkpoint技术
 
     def __init__(
         self,
@@ -381,6 +427,7 @@ def count_flops_attn(model, _x, y):
             custom_ops={QKVAttention: QKVAttention.count_flops},
         )
     """
+    # 估算注意力机制的计算量
     b, c, *spatial = y[0].shape
     num_spatial = int(np.prod(spatial))
     # We perform two matmuls with the same number of ops.
@@ -409,6 +456,8 @@ class QKVAttentionLegacy(nn.Module):
         bs, width, length = qkv.shape
         assert width % (3 * self.n_heads) == 0
         ch = width // (3 * self.n_heads)
+
+        # 注意这里qkv的分割方式和QKVAttention不一样
         q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
         scale = 1 / math.sqrt(math.sqrt(ch))
         weight = th.einsum(
@@ -427,6 +476,7 @@ class QKVAttention(nn.Module):
     """
     A module which performs QKV attention and splits in a different order.
     """
+    # 将Q、K、V合并在一个张量中，然后执行多头注意力计算
 
     def __init__(self, n_heads):
         super().__init__()
@@ -439,10 +489,15 @@ class QKVAttention(nn.Module):
         :param qkv: an [N x (3 * H * C) x T] tensor of Qs, Ks, and Vs.
         :return: an [N x (H * C) x T] tensor after attention.
         """
+        # N是batch size，H是head数，C是每个head的通道数，T是序列长度
+        # q，k，v的通道数必须相同，k和v的长度也必须相同
         bs, width, length = qkv.shape
         assert width % (3 * self.n_heads) == 0
         ch = width // (3 * self.n_heads)
-        q, k, v = qkv.chunk(3, dim=1)
+        q, k, v = qkv.chunk(3, dim = 1)
+
+        # 缩放系数，防止点积过大，保证数值稳定性
+        # scale = 1 / math.sqrt(ch)，ch是每个head的通道数
         scale = 1 / math.sqrt(math.sqrt(ch))
         weight = th.einsum(
             "bct,bcs->bts",
@@ -458,6 +513,8 @@ class QKVAttention(nn.Module):
         return count_flops_attn(model, _x, y)
 
 class FFParser(nn.Module):
+    # ff parser包含傅立叶变换
+    # 没有显式去除噪声的操作，但是应该是通过学习来抑制高频噪声
     def __init__(self, dim, h=128, w=65):
         super().__init__()
         self.complex_weight = nn.Parameter(torch.randn(dim, h, w, 2, dtype=torch.float32) * 0.02)
@@ -559,19 +616,22 @@ class UNetModel_v1preview(nn.Module):
         self.num_heads_upsample = num_heads_upsample
 
         time_embed_dim = model_channels * 4
+
+        # 时间嵌入
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),
             nn.SiLU(),
             linear(time_embed_dim, time_embed_dim),
         )
 
+        # 类别嵌入
         if self.num_classes is not None:
             self.label_emb = nn.Embedding(num_classes, time_embed_dim)
 
         self.input_blocks = nn.ModuleList(
             [
                 TimestepEmbedSequential(
-                    conv_nd(dims, in_channels, model_channels, 3, padding=1)
+                    conv_nd(dims, in_channels, model_channels, 3, padding = 1)
                 )
             ]
         )
@@ -580,18 +640,20 @@ class UNetModel_v1preview(nn.Module):
         input_block_chans = [model_channels]
         ch = model_channels
         ds = 1
+
+        # 降采样层
         for level, mult in enumerate(channel_mult):
-            
+            # resblock + attention + downsample
             for _ in range(num_res_blocks):
                 layers = [
                     ResBlock(
                         ch,
                         time_embed_dim,
                         dropout,
-                        out_channels=mult * model_channels,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
+                        out_channels = mult * model_channels,
+                        dims = dims,
+                        use_checkpoint = use_checkpoint,
+                        use_scale_shift_norm = use_scale_shift_norm,
                     )
                 ]
                 ch = mult * model_channels
@@ -609,7 +671,7 @@ class UNetModel_v1preview(nn.Module):
                 self._feature_size += ch
                 input_block_chans.append(ch)
 
-
+            # 如果不是最后一层，添加下采样层
             if level != len(channel_mult) - 1:
                 out_ch = ch
                 self.input_blocks.append(
@@ -636,6 +698,7 @@ class UNetModel_v1preview(nn.Module):
                 ds *= 2
                 self._feature_size += ch
 
+        # 中间层
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
@@ -663,13 +726,14 @@ class UNetModel_v1preview(nn.Module):
         )
         self._feature_size += ch
 
+        # 上采样层
         self.output_blocks = nn.ModuleList([])
         for level, mult in list(enumerate(channel_mult))[::-1]:
             for i in range(num_res_blocks + 1):
                 ich = input_block_chans.pop()
                 layers = [
                     ResBlock(
-                        ch + ich,
+                        ch + ich,                                   # 跳跃连接拼接后的通道数
                         time_embed_dim,
                         dropout,
                         out_channels=model_channels * mult,
@@ -751,11 +815,11 @@ class UNetModel_v1preview(nn.Module):
         hu = layer_norm(h.size()[1:])(h)
         return cu * hu * h
     
-    def highway_forward(self,x, hs):
-        return self.hwm(x,hs)
+    def highway_forward(self, x, hs):
+        return self.hwm(x, hs)
 
 
-    def forward(self, x, timesteps, y=None):
+    def forward(self, x, timesteps, y = None):
         """
         Apply the model to an input batch.
 
@@ -776,14 +840,16 @@ class UNetModel_v1preview(nn.Module):
             emb = emb + self.label_emb(y)
 
         h = x.type(self.dtype)
-        c = h[:,:-1,...]
-        hlist= []
+        c = h[:, :-1, ...]
+        hlist = []
         for ind, module in enumerate(self.input_blocks):
             if len(emb.size()) > 2:
                 emb = emb.squeeze()
             h = module(h, emb)
             hs.append(h)
-        uemb, cal = self.highway_forward(c, [hs[3],hs[6],hs[9],hs[12]])
+
+        # 利用unet提取特征
+        uemb, cal = self.highway_forward(c, [hs[3], hs[6], hs[9], hs[12]])
         h = h + uemb
         h = self.middle_block(h, emb)
         for module in self.output_blocks:
@@ -1024,6 +1090,7 @@ class UNetModel_newpreview(nn.Module):
             zero_module(conv_nd(dims, model_channels , out_channels, 3, padding=1)),
         )
 
+        # 和上一个模型的区别在这里，highway带有anchor_out和upscale_logits参数
         if high_way:
             features = 32
             self.hwm = Generic_UNet(self.in_channels - 1, features, 1, 5, anchor_out=True, upscale_logits=True)
@@ -1086,6 +1153,7 @@ class UNetModel_newpreview(nn.Module):
 
         h = x.type(self.dtype)
         c = h[:,:-1,...]
+        # 和上一个模型的区别，在input blocks就加入highway的输出
         anch, cal = self.highway_forward(c)
         for ind, module in enumerate(self.input_blocks):
             if len(emb.size()) > 2:
@@ -1121,13 +1189,13 @@ class SuperResModel(UNetModel_v1preview):
         x = th.cat([x, upsampled], dim=1)
         return super().forward(x, timesteps, **kwargs)
 
-
 class EncoderUNetModel(nn.Module):
     """
     The half UNet model with attention and timestep embedding.
 
     For usage, see UNet.
     """
+    # 半个unet
 
     def __init__(
         self,
@@ -1348,6 +1416,7 @@ class EncoderUNetModel(nn.Module):
             return self.out(h)
 
 class NeuralNetwork(nn.Module):
+    # 基础类，提供设备和forward函数
     def __init__(self):
         super(NeuralNetwork, self).__init__()
 
@@ -1366,7 +1435,24 @@ class NeuralNetwork(nn.Module):
     def forward(self, x):
         raise NotImplementedError
 
-
+# SegmentationNetwork
+# ├── 公开接口 (predict_3D/predict_2D)
+# │   ├── 判断网络类型 (2D/3D卷积)
+# │   ├── 选择预测策略 (滑动窗口/全卷积)
+# │   └── 执行预测
+# │
+# ├── 3D路径
+# │   ├── 3D卷积网络 → [_internal_predict_3D_3Dconv_tiled, _internal_predict_3D_3Dconv]
+# │   └── 2D卷积网络 → [_internal_predict_3D_2Dconv, _internal_predict_3D_2Dconv_tiled]
+# │
+# ├── 2D路径 → [_internal_predict_2D_2Dconv_tiled, _internal_predict_2D_2Dconv]
+# │
+# ├── 核心处理 → [_internal_maybe_mirror_and_pred_3D, _internal_maybe_mirror_and_pred_2D]
+# │   ├── 镜像增强 (8种3D/4种2D组合)
+# │   ├── 网络推理
+# │   └── 结果融合
+# │
+# └── 工具函数 → 计算步长、生成高斯图、填充图像等
 class SegmentationNetwork(NeuralNetwork):
     def __init__(self):
         super(NeuralNetwork, self).__init__()
@@ -2230,6 +2316,7 @@ class hwUpsample(nn.Module):
 
 
 class Generic_UNet(SegmentationNetwork):
+    # forward中输出锚点特征或者分割特征
     DEFAULT_BATCH_SIZE_3D = 2
     DEFAULT_PATCH_SIZE_3D = (64, 192, 160)
     SPACING_FACTOR_BETWEEN_STAGES = 2
@@ -2469,36 +2556,82 @@ class Generic_UNet(SegmentationNetwork):
             # self.apply(print_module_training_status)
 
     def forward(self, x, hs = None):
+        # 存储跳跃连接的列表
         skips = []
+
+        # 存储分割输出的列表
         seg_outputs = []
+
+        # 存储锚点输出的列表
         anch_outputs = []
         for d in range(len(self.conv_blocks_context) - 1):
+            # 编码器（下采样路径）
+            # 1. 卷积块处理
+            # 例如：输入 (B, 1, 256, 256) → 输出 (B, 32, 256, 256)
             x = self.conv_blocks_context[d](x)
-            skips.append(x)
+
+            # 2. 保存跳跃连接
+            # 保存当前特征图用于解码器的跳跃连接
+            skips.append(x)                     
             if not self.convolutional_pooling:
+                # 3. 下采样（池化）
+                # 例如：MaxPool2d(2,2) → (B, 32, 128, 128)
                 x = self.td[d](x)
             if hs:
+                # 4. Highway 连接（可选功能）
+                # 从外部传入的特征
                 h = hs.pop(0)
                 ddims = h.size(1)
+
+                # 特征转换A
                 h = self.conv_trans_blocks_a[d](h)
+
+                # 特征解析
                 h = self.ffparser[d](h)
+
+                # 特征转换B
                 ha = self.conv_trans_blocks_b[d](h)
-                hb = th.mean(h,(2,3))
+
+                # 全局平均池化
+                hb = th.mean(h,(2, 3))
+
+                # 重塑维度
                 hb = hb[:,:,None,None]
+
+                # 特征调制
                 x = x * ha * hb
             
+        # 瓶颈层
+        # 经过所有下采样后，进入网络最深处，使用1x1卷积进行特征提取
+        # # 例如：输入 (B, 256, 16, 16) → 输出 (B, 512, 16, 16)
 
         x = self.conv_blocks_context[-1](x)
+
+        # 生成嵌入特征（用于后续任务）
+        # 1×1卷积将特征映射到512维嵌入空间
         emb = conv_nd(2, x.size(1), 512, 1).to(device = x.device)(x)
 
+        # 解码器（上采样路径）
         for u in range(len(self.tu)):
+            # 1. 上采样操作
+            # 例如：双线性上采样2倍 → (B, 512, 32, 32)
             x = self.tu[u](x)
+
+            # 2. 跳跃连接拼接
+            # 例如：上采样特征 (B, 512, 32, 32) + skips[-1] (B, 256, 32, 32) → 拼接后 (B, 768, 32, 32)
             x = th.cat((x, skips[-(u + 1)]), dim=1)
+
+            # 3. 卷积块处理
+            # 例如：输出 (B, 256, 32, 32)
             x = self.conv_blocks_localization[u](x)
+
+            # 4. 深度监督输出（如果启用）
             if self._deep_supervision:
                 seg_outputs.append(self.final_nonlin(self.seg_outputs[u](x)))
             if self.anchor_out and (not self._deep_supervision):
                 anch_outputs.append(x)
+        
+
         if not seg_outputs:
             seg_outputs.append(self.final_nonlin(self.seg_outputs[0](x)))
 
@@ -2530,6 +2663,8 @@ class Generic_UNet(SegmentationNetwork):
         :param pool_op_kernel_sizes:
         :return:
         """
+        # 估算GPU显存使用量
+        # 帮助用户选择合适的batch size和patch size
         if not isinstance(num_pool_per_axis, np.ndarray):
             num_pool_per_axis = np.array(num_pool_per_axis)
 

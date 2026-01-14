@@ -1,3 +1,5 @@
+# 采样器
+
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -12,6 +14,8 @@ def create_named_schedule_sampler(name, diffusion, maxt):
     :param name: the name of the sampler.
     :param diffusion: the diffusion object to sample for.
     """
+    # 创建不同类型的采样器
+    # "uniform"（均匀采样）和 "loss-second-moment"（基于损失二阶矩的采样）
     if name == "uniform":
         return UniformSampler(diffusion, maxt)
     elif name == "loss-second-moment":
@@ -30,7 +34,7 @@ class ScheduleSampler(ABC):
     However, subclasses may override sample() to change how the resampled
     terms are reweighted, allowing for actual changes in the objective.
     """
-
+    # 定义了所有采样器必须实现的接口
     @abstractmethod
     def weights(self):
         """
@@ -38,6 +42,7 @@ class ScheduleSampler(ABC):
 
         The weights needn't be normalized, but must be positive.
         """
+        # 返回每个时间步的权重（未归一化）
 
     def sample(self, batch_size, device):
         """
@@ -49,6 +54,7 @@ class ScheduleSampler(ABC):
                  - timesteps: a tensor of timestep indices.
                  - weights: a tensor of weights to scale the resulting losses.
         """
+        # 采样批次时间步并计算重要性采样权重
         w = self.weights()
         p = w / np.sum(w)
         indices_np = np.random.choice(len(p), size=(batch_size,), p=p)
@@ -59,6 +65,7 @@ class ScheduleSampler(ABC):
 
 
 class UniformSampler(ScheduleSampler):
+    # 均匀采样器
     def __init__(self, diffusion, maxt):
         self.diffusion = diffusion
         self._weights = np.ones([maxt])
@@ -68,6 +75,7 @@ class UniformSampler(ScheduleSampler):
 
 
 class LossAwareSampler(ScheduleSampler):
+    # 损失感知采样器
     def update_with_local_losses(self, local_ts, local_losses):
         """
         Update the reweighting using losses from a model.
@@ -122,6 +130,7 @@ class LossAwareSampler(ScheduleSampler):
 
 
 class LossSecondMomentResampler(LossAwareSampler):
+    # 损失二阶矩重采样器
     def __init__(self, diffusion, history_per_term=10, uniform_prob=0.001):
         self.diffusion = diffusion
         self.history_per_term = history_per_term

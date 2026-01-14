@@ -1,3 +1,5 @@
+# 全面的分割评价指标，包括多类别的IOU和Dice系数，F-score，整体准确率
+# 详细的PrettyTable表格输出
 
 import sys
 import random
@@ -52,14 +54,13 @@ def eval(pre_eval_results):
     
     return ret_metrics
 
-
-def total_area_to_metrics(total_area_intersect, total_area_union,
-                                        total_area_pred_label,
-                                        total_area_label,nan_to_num=None,
-                          beta=1):
-    
-    
-
+# 计算的所有指标：
+# aAcc：整体准确率 = 总正确像素数 / 总标签像素数
+# IoU：交并比 = 交集 / 并集
+# Precision：精确度 = 交集 / 预测面积
+# Recall：召回率 = 交集 / 真实面积
+# Fscore：F1分数（Dice系数）
+def total_area_to_metrics(total_area_intersect, total_area_union, total_area_pred_label, total_area_label, nan_to_num = None, beta = 1):
     all_acc = total_area_intersect.sum() / total_area_label.sum()
     ret_metrics = OrderedDict({'aAcc': all_acc})
 
@@ -73,8 +74,7 @@ def total_area_to_metrics(total_area_intersect, total_area_union,
 
     precision = total_area_intersect / total_area_pred_label
     recall = total_area_intersect / total_area_label
-    f_value = torch.tensor(
-        [f_score(x[0], x[1], beta) for x in zip(precision, recall)])
+    f_value = torch.tensor([f_score(x[0], x[1], beta) for x in zip(precision, recall)])
     ret_metrics['Fscore'] = f_value
     ret_metrics['Precision'] = precision
     ret_metrics['Recall'] = recall
@@ -89,38 +89,28 @@ def total_area_to_metrics(total_area_intersect, total_area_union,
 
 def pre_eval(pred, seg_map):
     pre_eval_results = []
-    pre_eval_results.append(
-        intersect_and_union(
-            pred,
-            seg_map,
-            2))
+    pre_eval_results.append(intersect_and_union(pred, seg_map, 2))
     return pre_eval_results
 
-
-def intersect_and_union(pred_label,
-                        label,
-                        num_classes,
-                        ):
-
+def intersect_and_union(pred_label, label, num_classes,):
+    # 忽略标签值为255的像素（通常表示忽略区域）
     mask = (label != 255)
     pred_label = pred_label[mask]
     label = label[mask]
 
+    # 计算交集
     intersect = pred_label[pred_label == label]
-    area_intersect = torch.histc(
-        intersect.float(), bins=(num_classes), min=0, max=num_classes - 1)
-    area_pred_label = torch.histc(
-        pred_label.float(), bins=(num_classes), min=0, max=num_classes - 1)
-    area_label = torch.histc(
-        label.float(), bins=(num_classes), min=0, max=num_classes - 1)
+
+    # 使用直方图统计各类别的像素数量
+    area_intersect = torch.histc(intersect.float(), bins=(num_classes), min=0, max=num_classes - 1)
+    area_pred_label = torch.histc(pred_label.float(), bins=(num_classes), min=0, max=num_classes - 1)
+    area_label = torch.histc(label.float(), bins=(num_classes), min=0, max=num_classes - 1)
     area_union = area_pred_label + area_label - area_intersect
     return area_intersect, area_union, area_pred_label, area_label
 
-
-def f_score(precision, recall, beta=1):
-    
-    score = (1 + beta**2) * (precision * recall) / (
-        (beta**2 * precision) + recall)
+# 计算F-score
+def f_score(precision, recall, beta = 1):
+    score = (1 + beta ** 2) * (precision * recall) / ((beta ** 2 * precision) + recall)
     return score
 
 

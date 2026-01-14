@@ -2,6 +2,8 @@
 Helpers to train with 16-bit precision.
 """
 
+# 混合精度训练，将部分模型参数转换为float16以节省显存和加速计算
+
 import numpy as np
 import torch as th
 import torch.nn as nn
@@ -16,6 +18,7 @@ def convert_module_to_f16(l):
     """
     Convert primitive modules to float16.
     """
+    # 仅转换卷积层的权重和偏置为float16
     if isinstance(l, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
         l.weight.data = l.weight.data.half()
         if l.bias is not None:
@@ -26,6 +29,7 @@ def convert_module_to_f32(l):
     """
     Convert primitive modules to float32, undoing convert_module_to_f16().
     """
+    # 仅转换卷积层的权重和偏置为float32
     if isinstance(l, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
         l.weight.data = l.weight.data.float()
         if l.bias is not None:
@@ -37,10 +41,12 @@ def make_master_params(param_groups_and_shapes):
     Copy model parameters into a (differently-shaped) list of full-precision
     parameters.
     """
+    # 将模型参数复制到一个（形状不同的）全精度参数列表中
     master_params = []
     for param_group, shape in param_groups_and_shapes:
         master_param = nn.Parameter(
             _flatten_dense_tensors(
+                # 转成float
                 [param.detach().float() for (_, param) in param_group]
             ).view(shape)
         )
@@ -54,6 +60,7 @@ def model_grads_to_master_grads(param_groups_and_shapes, master_params):
     Copy the gradients from the model parameters into the master parameters
     from make_master_params().
     """
+    # 拷贝梯度到由make_master_params创建的主参数中
     for master_param, (param_group, shape) in zip(
         master_params, param_groups_and_shapes
     ):
@@ -68,6 +75,7 @@ def master_params_to_model_params(param_groups_and_shapes, master_params):
     """
     # Without copying to a list, if a generator is passed, this will
     # silently not copy any parameters.
+    # 将主参数数据复制回模型参数
     for master_param, (param_group, _) in zip(master_params, param_groups_and_shapes):
         for (_, param), unflat_master_param in zip(
             param_group, unflatten_master_params(param_group, master_param.view(-1))
@@ -76,10 +84,12 @@ def master_params_to_model_params(param_groups_and_shapes, master_params):
 
 
 def unflatten_master_params(param_group, master_param):
+    # 将扁平化的主参数还原为与模型参数相同的形状
     return _unflatten_dense_tensors(master_param, [param for (_, param) in param_group])
 
 
 def get_param_groups_and_shapes(named_model_params):
+    # 获取模型参数的分组和形状信息
     named_model_params = list(named_model_params)
     scalar_vector_named_params = (
         [(n, p) for (n, p) in named_model_params if p.ndim <= 1],
@@ -95,6 +105,7 @@ def get_param_groups_and_shapes(named_model_params):
 def master_params_to_state_dict(
     model, param_groups_and_shapes, master_params, use_fp16
 ):
+    # 将主参数转换为状态字典
     if use_fp16:
         state_dict = model.state_dict()
         for master_param, (param_group, _) in zip(
@@ -114,6 +125,7 @@ def master_params_to_state_dict(
 
 
 def state_dict_to_master_params(model, state_dict, use_fp16):
+    # 从状态字典创建主参数列表
     if use_fp16:
         named_model_params = [
             (name, state_dict[name]) for name, _ in model.named_parameters()
@@ -126,11 +138,13 @@ def state_dict_to_master_params(model, state_dict, use_fp16):
 
 
 def zero_master_grads(master_params):
+    # 将主参数的梯度置零
     for param in master_params:
         param.grad = None
 
 
 def zero_grad(model_params):
+    # 将模型参数的梯度置零
     for param in model_params:
         # Taken from https://pytorch.org/docs/stable/_modules/torch/optim/optimizer.html#Optimizer.add_param_group
         if param.grad is not None:
@@ -139,20 +153,20 @@ def zero_grad(model_params):
 
 
 def param_grad_or_zeros(param):
+    # 获取参数的梯度，如果没有梯度则返回与参数形状相同的零张量
     if param.grad is not None:
         return param.grad.data.detach()
     else:
         return th.zeros_like(param)
-
 
 class MixedPrecisionTrainer:
     def __init__(
         self,
         *,
         model,
-        use_fp16=False,
-        fp16_scale_growth=1e-3,
-        initial_lg_loss_scale=INITIAL_LOG_LOSS_SCALE,
+        use_fp16 = False,
+        fp16_scale_growth = 1e-3,
+        initial_lg_loss_scale = INITIAL_LOG_LOSS_SCALE,
     ):
         self.model = model
         self.use_fp16 = use_fp16
@@ -233,4 +247,5 @@ class MixedPrecisionTrainer:
 
 
 def check_overflow(value):
+    # 检查是否溢出
     return (value == float("inf")) or (value == -float("inf")) or (value != value)

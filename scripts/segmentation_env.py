@@ -1,3 +1,4 @@
+# 评估图像分割结果的IOU和Dice系数，简单文本输出，支持多类别
 
 import sys
 import random

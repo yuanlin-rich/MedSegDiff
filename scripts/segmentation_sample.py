@@ -1,5 +1,3 @@
-
-
 import argparse
 import os
 from ssl import OP_NO_TLSv1

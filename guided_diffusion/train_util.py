@@ -46,14 +46,16 @@ class TrainLoop:
         log_interval,
         save_interval,
         resume_checkpoint,
-        use_fp16=False,
-        fp16_scale_growth=1e-3,
-        schedule_sampler=None,
-        weight_decay=0.0,
-        lr_anneal_steps=0,
+        use_fp16 = False,
+        fp16_scale_growth = 1e-3,
+        schedule_sampler = None,
+        weight_decay = 0.0,
+        lr_anneal_steps = 0,
     ):
+        # model是unet，diffusion是gaussian diffusion
+        # classifier是None
         self.model = model
-        self.dataloader=dataloader
+        self.dataloader = dataloader
         self.classifier = classifier
         self.diffusion = diffusion
         self.data = data
@@ -82,9 +84,9 @@ class TrainLoop:
 
         self._load_and_sync_parameters()
         self.mp_trainer = MixedPrecisionTrainer(
-            model=self.model,
-            use_fp16=self.use_fp16,
-            fp16_scale_growth=fp16_scale_growth,
+            model = self.model,
+            use_fp16 = self.use_fp16,
+            fp16_scale_growth = fp16_scale_growth,
         )
 
         self.opt = AdamW(
@@ -167,30 +169,27 @@ class TrainLoop:
             self.opt.load_state_dict(state_dict)
 
     def run_loop(self):
+        # 训练循环
         i = 0
         data_iter = iter(self.dataloader)
         while (
             not self.lr_anneal_steps
             or self.step + self.resume_step < self.lr_anneal_steps
         ):
-
-
             try:
-                    batch, cond, name = next(data_iter)
+                batch, cond, name = next(data_iter)
             except StopIteration:
-                    # StopIteration is thrown if dataset ends
-                    # reinitialize data loader
-                    data_iter = iter(self.dataloader)
-                    batch, cond, name = next(data_iter)
-
+                # StopIteration is thrown if dataset ends
+                # reinitialize data loader
+                data_iter = iter(self.dataloader)
+                batch, cond, name = next(data_iter)
             self.run_step(batch, cond)
-
-           
-            i += 1
-          
+            i += 1          
             if self.step % self.log_interval == 0:
+                # 打印日志
                 logger.dumpkvs()
             if self.step % self.save_interval == 0:
+                # 保存训练结果
                 self.save()
                 # Run for a finite amount of time in integration tests.
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
@@ -201,9 +200,10 @@ class TrainLoop:
             self.save()
 
     def run_step(self, batch, cond):
-        batch=th.cat((batch, cond), dim=1)
+        # 单步训练
+        batch = th.cat((batch, cond), dim=1)
 
-        cond={}
+        cond = {}
         sample = self.forward_backward(batch, cond)
         took_step = self.mp_trainer.optimize(self.opt)
         if took_step:
@@ -213,7 +213,7 @@ class TrainLoop:
         return sample
 
     def forward_backward(self, batch, cond):
-
+        # 清空上一次的梯度
         self.mp_trainer.zero_grad()
         for i in range(0, batch.shape[0], self.microbatch):
             micro = batch[i : i + self.microbatch].to(dist_util.dev())
@@ -223,15 +223,18 @@ class TrainLoop:
             }
 
             last_batch = (i + self.microbatch) >= batch.shape[0]
+
+            # 采样时间t和损失函数的权重
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
 
+            # 损失函数
             compute_losses = functools.partial(
                 self.diffusion.training_losses_segmentation,
                 self.ddp_model,
                 self.classifier,
                 micro,
                 t,
-                model_kwargs=micro_cond,
+                model_kwargs = micro_cond,
             )
 
             if last_batch or not self.use_ddp:
@@ -253,11 +256,13 @@ class TrainLoop:
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}
             )
+
+            # 反向传播
             self.mp_trainer.backward(loss)
             for name, param in self.ddp_model.named_parameters():
                 if param.grad is None:
                     print(name)
-            return  sample
+            return sample
 
     def _update_ema(self):
         for rate, params in zip(self.ema_rate, self.ema_params):

@@ -1,17 +1,19 @@
+# ddpm solver
+# 利用图像和噪声的先验信息，直接执行去噪过程。和使用模型预测噪声的方式做对比
 import torch
 import torch.nn.functional as F
 import math
 
-
+# 噪声调度
 class NoiseScheduleVP:
     def __init__(
             self,
-            schedule='discrete',
-            betas=None,
-            alphas_cumprod=None,
-            continuous_beta_0=0.1,
-            continuous_beta_1=20.,
-            dtype=torch.float32,
+            schedule = 'discrete',
+            betas = None,
+            alphas_cumprod = None,
+            continuous_beta_0 = 0.1,
+            continuous_beta_1 = 20.,
+            dtype = torch.float32,
         ):
         """Create a wrapper class for the forward SDE (VP type).
         ***
@@ -69,14 +71,16 @@ class NoiseScheduleVP:
         # For continuous-time DPMs (VPSDE), linear schedule:
         >>> ns = NoiseScheduleVP('linear', continuous_beta_0=0.1, continuous_beta_1=20.)
         """
-
+        # 三种噪声调度方式：离散、线性、余弦
+        # 离散需要提供betas或者alphas_cumprod
+        # 线性和余弦需要提供连续时间的beta范围
         if schedule not in ['discrete', 'linear', 'cosine']:
             raise ValueError("Unsupported noise schedule {}. The schedule needs to be 'discrete' or 'linear' or 'cosine'".format(schedule))
 
         self.schedule = schedule
         if schedule == 'discrete':
             if betas is not None:
-                log_alphas = 0.5 * torch.log(1 - betas).cumsum(dim=0)
+                log_alphas = 0.5 * torch.log(1 - betas).cumsum(dim = 0)
             else:
                 assert alphas_cumprod is not None
                 log_alphas = 0.5 * torch.log(alphas_cumprod)
@@ -104,6 +108,7 @@ class NoiseScheduleVP:
         """
         Compute log(alpha_t) of a given continuous-time label t in [0, T].
         """
+        # 给定时间t，计算log(αₜ)
         if self.schedule == 'discrete':
             return interpolate_fn(t.reshape((-1, 1)), self.t_array.to(t.device), self.log_alpha_array.to(t.device)).reshape((-1))
         elif self.schedule == 'linear':
@@ -117,18 +122,21 @@ class NoiseScheduleVP:
         """
         Compute alpha_t of a given continuous-time label t in [0, T].
         """
+        # 给定时间t，计算αₜ
         return torch.exp(self.marginal_log_mean_coeff(t))
 
     def marginal_std(self, t):
         """
         Compute sigma_t of a given continuous-time label t in [0, T].
         """
+        # 给定时间t，计算噪声标准差σₜ
         return torch.sqrt(1. - torch.exp(2. * self.marginal_log_mean_coeff(t)))
 
     def marginal_lambda(self, t):
         """
         Compute lambda_t = log(alpha_t) - log(sigma_t) of a given continuous-time label t in [0, T].
         """
+        # 给定时间t，计算半对数信噪比λₜ
         log_mean_coeff = self.marginal_log_mean_coeff(t)
         log_std = 0.5 * torch.log(1. - torch.exp(2. * log_mean_coeff))
         return log_mean_coeff - log_std
@@ -137,6 +145,8 @@ class NoiseScheduleVP:
         """
         Compute the continuous-time label t in [0, T] of a given half-logSNR lambda_t.
         """
+        # 这是从λₜ（半对数信噪比）反推时间t的
+        # dmp-solver时间步调度的核心
         if self.schedule == 'linear':
             tmp = 2. * (self.beta_1 - self.beta_0) * torch.logaddexp(-2. * lamb, torch.zeros((1,)).to(lamb))
             Delta = self.beta_0**2 + tmp
@@ -150,7 +160,6 @@ class NoiseScheduleVP:
             t_fn = lambda log_alpha_t: torch.arccos(torch.exp(log_alpha_t + self.cosine_log_alpha_0)) * 2. * (1. + self.cosine_s) / math.pi - self.cosine_s
             t = t_fn(log_alpha)
             return t
-
 
 def model_wrapper(
     model,
@@ -236,6 +245,7 @@ def model_wrapper(
     Returns:
         A noise prediction model that accepts the noised data and the continuous time as the inputs.
     """
+    # 为不同的预测模型（预测噪声，预测原始数据等）提供统一的接口
 
     def get_model_input_time(t_continuous):
         """
@@ -243,26 +253,34 @@ def model_wrapper(
         For discrete-time DPMs, we convert `t_continuous` in [1 / N, 1] to `t_input` in [0, 1000 * (N - 1) / N].
         For continuous-time DPMs, we just use `t_continuous`.
         """
+        # 如何噪声调度是离散的，就把连续时间t映射到离散时间上
         if noise_schedule.schedule == 'discrete':
             return (t_continuous - 1. / noise_schedule.total_N) * 1000.
         else:
             return t_continuous
 
-    def noise_pred_fn(x, t_continuous, cond=None):
+    def noise_pred_fn(x, t_continuous, cond = None):
+        # 使用模型预测
         t_input = get_model_input_time(t_continuous)
         if cond is None:
+            # 无条件预测
             output = model(x, t_input, **model_kwargs)
         else:
+            # 有条件预测
             output = model(x, t_input, cond, **model_kwargs)
         if model_type == "noise":
+            # 预测噪声
             return output
         elif model_type == "x_start":
+            # 预测原始值
             alpha_t, sigma_t = noise_schedule.marginal_alpha(t_continuous), noise_schedule.marginal_std(t_continuous)
             return (x - alpha_t * output) / sigma_t
         elif model_type == "v":
+            # 预测速度
             alpha_t, sigma_t = noise_schedule.marginal_alpha(t_continuous), noise_schedule.marginal_std(t_continuous)
             return alpha_t * output + sigma_t * x
         elif model_type == "score":
+            # 预测分数函数（分数函数是概率函数的梯度）
             sigma_t = noise_schedule.marginal_std(t_continuous)
             return -sigma_t * output
 
@@ -270,6 +288,7 @@ def model_wrapper(
         """
         Compute the gradient of the classifier, i.e. nabla_{x} log p_t(cond | x_t).
         """
+        # 计算分类器的梯度，用于分类器引导
         with torch.enable_grad():
             x_in = x.detach().requires_grad_(True)
             log_prob = classifier_fn(x_in, t_input, condition, **classifier_kwargs)
@@ -279,9 +298,12 @@ def model_wrapper(
         """
         The noise predicition model function that is used for DPM-Solver.
         """
+        # 统一的接口函数，输入噪声图像和当前时间，输出DPM-Solver需要的噪声预测，自动处理了所有模型类型和引导方式的差异
         if guidance_type == "uncond":
+            # 无分类引导
             return noise_pred_fn(x, t_continuous)
         elif guidance_type == "classifier":
+            # 分类器引导
             assert classifier_fn is not None
             t_input = get_model_input_time(t_continuous)
             cond_grad = cond_grad_fn(x, t_input)
@@ -289,6 +311,7 @@ def model_wrapper(
             noise = noise_pred_fn(x, t_continuous)
             return noise - guidance_scale * sigma_t * cond_grad
         elif guidance_type == "classifier-free":
+            # 不需要额外的分类器模型，而是让扩散模型自己同时学会有条件和无条件生成
             if guidance_scale == 1. or unconditional_condition is None:
                 return noise_pred_fn(x, t_continuous, cond=condition)
             else:
@@ -304,15 +327,17 @@ def model_wrapper(
 
 
 class DPM_Solver:
+    # DPM-Solver 是一个"智能ODE求解器"，用更少的步数生成更高质量的图像。
+    # 传统扩散模型（如DDIM）需要50-100步，DPM-Solver只需要10-20步就能达到相同甚至更好的质量。
     def __init__(
         self,
         model_fn,
         noise_schedule,
-        algorithm_type="dpmsolver++",
-        correcting_x0_fn=None,
-        correcting_xt_fn=None,
-        thresholding_max_val=1.,
-        dynamic_thresholding_ratio=0.995,
+        algorithm_type = "dpmsolver++",
+        correcting_x0_fn = None,
+        correcting_xt_fn = None,
+        thresholding_max_val = 1.,
+        dynamic_thresholding_ratio = 0.995,
         img = None,
     ):
         """Construct a DPM-Solver. 
@@ -383,9 +408,10 @@ class DPM_Solver:
         """
         The dynamic thresholding method. 
         """
+        # 根据图像的像素分布，动态调整裁剪阈值，防止极端像素值影响整体图像质量
         dims = x0.dim()
         p = self.dynamic_thresholding_ratio
-        s = torch.quantile(torch.abs(x0).reshape((x0.shape[0], -1)), p, dim=1)
+        s = torch.quantile(torch.abs(x0).reshape((x0.shape[0], -1)), p, dim = 1)
         s = expand_dims(torch.maximum(s, self.thresholding_max_val * torch.ones_like(s).to(s.device)), dims)
         s = s.item() 
         x0 = torch.clamp(x0, -s, s) / s
@@ -395,7 +421,9 @@ class DPM_Solver:
         """
         Return the noise prediction model.
         """
-        out = self.model(torch.cat((self.img,x), dim=1).to(dtype = torch.float), t)
+        # 预测噪声
+        # 将参考图像和带噪声的图像拼接在一起，输入模型进行预测
+        out = self.model(torch.cat((self.img, x), dim = 1).to(dtype = torch.float), t)
         if isinstance(out, tuple):
             return out[0]
         return out
@@ -404,6 +432,7 @@ class DPM_Solver:
         """
         Return the data prediction model (with corrector).
         """
+        # 数据预测函数，它将噪声预测转换为干净图像的预测
         noise = self.noise_prediction_fn(x, t)
         alpha_t, sigma_t = self.noise_schedule.marginal_alpha(t), self.noise_schedule.marginal_std(t)
         x0 = (x - sigma_t * noise[:,0:1,:,:]) / alpha_t
@@ -415,9 +444,16 @@ class DPM_Solver:
         """
         Convert the model to the noise prediction model or the data prediction model. 
         """
+        # 根据算法类型算则预测噪声还是预测数据
         if self.algorithm_type == "dpmsolver++":
+            # 发现在数据空间更稳定
+            # 可以应用后处理（如动态阈值）
+            # 成为当前主流
             return self.data_prediction_fn(x, t)
         else:
+            # 直接扩展DDIM的思想
+            # 在噪声空间进行高阶求解
+            # 数值稳定性一般
             return self.noise_prediction_fn(x, t)
 
     def get_time_steps(self, skip_type, t_T, t_0, N, device):
@@ -434,6 +470,7 @@ class DPM_Solver:
         Returns:
             A pytorch tensor of the time steps, with the shape (N + 1,).
         """
+        # 生成时间步骤，在这些时间步骤t上进行加噪和去噪
         if skip_type == 'logSNR':
             lambda_T = self.noise_schedule.marginal_lambda(torch.tensor(t_T).to(device))
             lambda_0 = self.noise_schedule.marginal_lambda(torch.tensor(t_0).to(device))
@@ -478,6 +515,11 @@ class DPM_Solver:
         Returns:
             orders: A list of the solver order of each step.
         """
+        # 智能组合不同阶数的求解器以实现高效采样
+        # 给定总函数评估次数steps和最大阶数order，生成：
+        # timesteps_outer：时间点序列，在哪些时间进行计算
+        # orders：阶数序列，每个时间步使用几阶求解器
+
         if order == 3:
             K = steps // 3 + 1
             if steps % 3 == 0:
@@ -509,6 +551,7 @@ class DPM_Solver:
         """
         Denoise at the final step, which is equivalent to solve the ODE from lambda_s to infty by first-order discretization. 
         """
+        # 在结束去噪后，最后执行一次去噪（有可能有噪声残留，结束的时间点并不是0）
         return self.data_prediction_fn(x, s)
 
     def dpm_solver_first_update(self, x, s, t, model_s=None, return_intermediate=False):
@@ -524,6 +567,8 @@ class DPM_Solver:
         Returns:
             x_t: A pytorch tensor. The approximated solution at time `t`.
         """
+        # dpm-solver的一阶更新函数
+        # 从时间s到时间t，使用一阶方法更新图像x，返回去噪图像
         ns = self.noise_schedule
         dims = x.dim()
         lambda_s, lambda_t = ns.marginal_lambda(s), ns.marginal_lambda(t)
@@ -573,6 +618,8 @@ class DPM_Solver:
         Returns:
             x_t: A pytorch tensor. The approximated solution at time `t`.
         """
+        # dpm-solver的二阶更新函数
+        # 从时间s到时间t，使用二阶方法更新图像x，返回去噪图像
         if solver_type not in ['dpmsolver', 'taylor']:
             raise ValueError("'solver_type' must be either 'dpmsolver' or 'taylor', got {}".format(solver_type))
         if r1 is None:
@@ -656,6 +703,8 @@ class DPM_Solver:
         Returns:
             x_t: A pytorch tensor. The approximated solution at time `t`.
         """
+        # dpm-solver的三阶更新函数
+        # 从时间s到时间t，使用三阶方法更新图像x，返回去噪图像
         if solver_type not in ['dpmsolver', 'taylor']:
             raise ValueError("'solver_type' must be either 'dpmsolver' or 'taylor', got {}".format(solver_type))
         if r1 is None:
@@ -770,6 +819,7 @@ class DPM_Solver:
         Returns:
             x_t: A pytorch tensor. The approximated solution at time `t`.
         """
+        # dpm-solver的多步二阶更新函数
         if solver_type not in ['dpmsolver', 'taylor']:
             raise ValueError("'solver_type' must be either 'dpmsolver' or 'taylor', got {}".format(solver_type))
         ns = self.noise_schedule
@@ -827,6 +877,7 @@ class DPM_Solver:
         Returns:
             x_t: A pytorch tensor. The approximated solution at time `t`.
         """
+        # dpm-solver的多步三阶更新函数
         ns = self.noise_schedule
         model_prev_2, model_prev_1, model_prev_0 = model_prev_list
         t_prev_2, t_prev_1, t_prev_0 = t_prev_list
@@ -881,6 +932,7 @@ class DPM_Solver:
         Returns:
             x_t: A pytorch tensor. The approximated solution at time `t`.
         """
+        # 单步更新函数，根据order选择不同阶数的求解器
         if order == 1:
             return self.dpm_solver_first_update(x, s, t, return_intermediate=return_intermediate)
         elif order == 2:
@@ -904,6 +956,7 @@ class DPM_Solver:
         Returns:
             x_t: A pytorch tensor. The approximated solution at time `t`.
         """
+        # 多步更新函数，根据order选择不同阶数的求解器
         if order == 1:
             return self.dpm_solver_first_update(x, t_prev_list[-1], t, model_s=model_prev_list[-1])
         elif order == 2:
@@ -933,6 +986,7 @@ class DPM_Solver:
             x_0: A pytorch tensor. The approximated solution at time `t_0`.
         [1] A. Jolicoeur-Martineau, K. Li, R. Piché-Taillefer, T. Kachman, and I. Mitliagkas, "Gotta go fast when generating data with score-based models," arXiv preprint arXiv:2105.14080, 2021.
         """
+        # 自适应步长求解器
         ns = self.noise_schedule
         s = t_T * torch.ones((1,)).to(x)
         lambda_s = ns.marginal_lambda(s)
@@ -967,7 +1021,7 @@ class DPM_Solver:
         print('adaptive solver nfe', nfe)
         return x
 
-    def add_noise(self, x, t, noise=None):
+    def add_noise(self, x, t, noise = None):
         """
         Compute the noised input xt = alpha_t * x + sigma_t * noise. 
         Args:
@@ -976,6 +1030,8 @@ class DPM_Solver:
         Returns:
             xt with shape `(t_size, batch_size, *shape)`.
         """
+        # 前向加噪函数
+        # 将干净图像加噪到指定时间步
         alpha_t, sigma_t = self.noise_schedule.marginal_alpha(t), self.noise_schedule.marginal_std(t)
         if noise is None:
             noise = torch.randn((t.shape[0], *x.shape), device=x.device)
@@ -994,6 +1050,7 @@ class DPM_Solver:
         Inverse the sample `x` from time `t_start` to `t_end` by DPM-Solver.
         For discrete-time DPMs, we use `t_start=1/N`, where `N` is the total time steps during training.
         """
+        # 逆向去噪函数，从时间t_start到t_end使用dpm-solver去噪图像x
         t_0 = 1. / self.noise_schedule.total_N if t_start is None else t_start
         t_T = self.noise_schedule.T if t_end is None else t_end
         assert t_0 > 0 and t_T > 0, "Time range needs to be greater than 0. For discrete-time DPMs, it needs to be in [1 / N, 1], where N is the length of betas array"
@@ -1105,6 +1162,7 @@ class DPM_Solver:
         Returns:
             x_end: A pytorch tensor. The approximated solution at time `t_end`.
         """
+        # 从初始噪声状态 x（在时间 t_start）去噪到目标状态（在时间 t_end）
 
         t_0 = 1. / self.noise_schedule.total_N if t_end is None else t_end
         t_T = self.noise_schedule.T if t_start is None else t_start
@@ -1203,8 +1261,13 @@ class DPM_Solver:
 #############################################################
 # other utility functions
 #############################################################
-
 def interpolate_fn(x, xp, yp):
+    # 线性插值函数，xp和yp是关键点，维度分别是[C, K]
+    # x的维度是[N, C]，输出f(x)的维度是[N, C]
+    # 找到x在哪两个xp值之间
+    # 用直线连接这两个点
+    # 计算x对应的y值
+
     """
     A piecewise linear function y = f(x), using xp and yp as keypoints.
     We implement f(x) in a differentiable way (i.e. applicable for autograd).
@@ -1244,8 +1307,9 @@ def interpolate_fn(x, xp, yp):
     cand = start_y + (x - start_x) * (end_y - start_y) / (end_x - start_x)
     return cand
 
-
 def expand_dims(v, dims):
+    # 将一个形状为[N]的一维张量扩展成形状为[N, 1, 1, ..., 1]的多维张量
+    # 其中总维度数为dims
     """
     Expand the tensor `v` to the dim `dims`.
     Args:
@@ -1255,4 +1319,3 @@ def expand_dims(v, dims):
         a PyTorch tensor with shape [N, 1, 1, ..., 1] and the total dimension is `dims`.
     """
     return v[(...,) + (None,)*(dims - 1)]
-
